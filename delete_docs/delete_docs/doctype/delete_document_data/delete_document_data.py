@@ -27,8 +27,7 @@ class DeleteDocumentData(Document):
 		item_count = frappe.db.count(doctype)
 		for i in range(0,item_count,batch_size):
 			item_list = frappe.get_all(doctype, limit=batch_size, offset=i, pluck="name")
-			frappe.enqueue("delete_docs.delete_docs.doctype.delete_document_data.delete_document_data._delete_document_batch", doctype=doctype, item_list=item_list)
-			# _delete_document_batch(doctype, item_list)
+			frappe.enqueue("delete_docs.delete_docs.doctype.delete_document_data.delete_document_data._delete_document_batch", doctype=doctype, item_list=item_list,queue="long")
 
 
 
