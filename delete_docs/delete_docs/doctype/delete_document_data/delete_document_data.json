@@ -5,21 +5,57 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "document",
-  "column_break_pvyx",
-  "batch_size"
+  "documents_section",
+  "documents",
+  "options_section",
+  "skip_hooks",
+  "delete_child_tables",
+  "auto_order_dependencies",
+  "column_break_options",
+  "batch_size",
+  "workers"
  ],
  "fields": [
   {
-   "fieldname": "document",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Document",
-   "options": "DocType",
+   "fieldname": "documents_section",
+   "fieldtype": "Section Break",
+   "label": "Documents to Delete"
+  },
+  {
+   "fieldname": "documents",
+   "fieldtype": "Table",
+   "label": "Documents",
+   "options": "Delete Document Item",
    "reqd": 1
   },
   {
-   "fieldname": "column_break_pvyx",
+   "fieldname": "options_section",
+   "fieldtype": "Section Break",
+   "label": "Options"
+  },
+  {
+   "default": "1",
+   "description": "Direct DB delete — skips on_trash hooks, permissions, and link checks. Much faster but bypasses all validations.",
+   "fieldname": "skip_hooks",
+   "fieldtype": "Check",
+   "label": "Skip Hooks (Direct DB Delete)"
+  },
+  {
+   "default": "1",
+   "description": "Automatically detect and delete child table rows linked to the parent DocType.",
+   "fieldname": "delete_child_tables",
+   "fieldtype": "Check",
+   "label": "Delete Child Tables"
+  },
+  {
+   "default": "1",
+   "description": "Automatically reorder DocTypes so linked parents are deleted after their children.",
+   "fieldname": "auto_order_dependencies",
+   "fieldtype": "Check",
+   "label": "Auto-order Dependencies"
+  },
+  {
+   "fieldname": "column_break_options",
    "fieldtype": "Column Break"
   },
   {
@@ -27,6 +63,13 @@
    "fieldname": "batch_size",
    "fieldtype": "Int",
    "label": "Batch Size"
+  },
+  {
+   "default": "4",
+   "description": "Number of parallel background workers (only used when Skip Hooks is off).",
+   "fieldname": "workers",
+   "fieldtype": "Int",
+   "label": "Workers"
   }
  ],
  "grid_page_length": 50,
