@@ -18,8 +18,10 @@ class DeleteDocumentData(Document):
 
 		auto_order_dependencies: DF.Check
 		batch_size: DF.Int
+		cancel_before_delete: DF.Check
 		delete_child_tables: DF.Check
 		documents: DF.Table[DeleteDocumentItem]
+		include_connected_docs: DF.Check
 		skip_hooks: DF.Check
 		workers: DF.Int
 	# end: auto-generated types
@@ -37,6 +39,9 @@ class DeleteDocumentData(Document):
 		if not doctypes:
 			frappe.throw("Please add at least one DocType to delete.")
 
+		if self.include_connected_docs:
+			doctypes = discover_connected_doctypes(doctypes)
+
 		if self.auto_order_dependencies:
 			doctypes = order_by_dependencies(doctypes)
 
@@ -45,6 +50,7 @@ class DeleteDocumentData(Document):
 			doctypes=doctypes,
 			skip_hooks=cint(self.skip_hooks),
 			delete_child_tables=cint(self.delete_child_tables),
+			cancel_before_delete=cint(self.cancel_before_delete),
 			batch_size=self.batch_size or 1000,
 			workers=cint(self.workers) or 4,
 			queue="long",
@@ -54,6 +60,87 @@ class DeleteDocumentData(Document):
 			f"Bulk delete queued for {len(doctypes)} DocType(s) in the background.",
 			alert=True,
 		)
+
+
+def discover_connected_doctypes(doctypes):
+	"""Discover all submittable doctypes that have links to the given doctypes.
+
+	For example, if 'Sales Order' is given, this will find 'Delivery Note',
+	'Sales Invoice', 'Purchase Order', etc. that reference Sales Order.
+	"""
+	doctype_set = set(doctypes)
+	discovered = set(doctypes)
+	to_process = list(doctypes)
+
+	while to_process:
+		current = to_process.pop(0)
+		linked_doctypes = find_linked_doctypes(current)
+		for linked_dt in linked_doctypes:
+			if linked_dt not in discovered:
+				discovered.add(linked_dt)
+				to_process.append(linked_dt)
+
+	return list(discovered)
+
+
+def find_linked_doctypes(doctype):
+	"""Find all doctypes that have Link or Dynamic Link fields pointing to this doctype."""
+	linked = set()
+
+	system_doctypes = [
+		"DocType", "DocField", "DocPerm", "DocType Link",
+		"DocType Action", "DocType State", "Custom Field", "Property Setter",
+	]
+
+	# Find doctypes with Link fields pointing to this doctype
+	link_fields = frappe.get_all(
+		"DocField",
+		filters={
+			"fieldtype": "Link",
+			"options": doctype,
+			"parent": ["not in", system_doctypes],
+		},
+		fields=["parent"],
+		distinct=True,
+	)
+
+	for field in link_fields:
+		parent_dt = field.parent
+		if is_submittable(parent_dt) and not is_child_table(parent_dt):
+			linked.add(parent_dt)
+
+	# Find doctypes with Dynamic Link fields that could point to this doctype
+	dynamic_link_fields = frappe.get_all(
+		"DocField",
+		filters={
+			"fieldtype": "Dynamic Link",
+			"parent": ["not in", system_doctypes],
+		},
+		fields=["parent", "options"],
+		distinct=True,
+	)
+
+	for field in dynamic_link_fields:
+		parent_dt = field.parent
+		if is_child_table(parent_dt) or not is_submittable(parent_dt):
+			continue
+		# Check if any record of this doctype actually references our target doctype
+		# field.options is the fieldname that holds the doctype name
+		exists = frappe.db.exists(parent_dt, {field.options: doctype})
+		if exists:
+			linked.add(parent_dt)
+
+	return linked
+
+
+def is_submittable(doctype):
+	"""Check if a doctype is submittable."""
+	return cint(frappe.db.get_value("DocType", doctype, "is_submittable"))
+
+
+def is_child_table(doctype):
+	"""Check if a doctype is a child table."""
+	return cint(frappe.db.get_value("DocType", doctype, "istable"))
 
 
 def order_by_dependencies(doctypes):
@@ -99,7 +186,7 @@ def get_child_tables(doctype):
 	return child_tables
 
 
-def run_bulk_delete(doctypes, skip_hooks, delete_child_tables, batch_size, workers):
+def run_bulk_delete(doctypes, skip_hooks, delete_child_tables, cancel_before_delete, batch_size, workers):
 	"""Process deletion for each DocType sequentially (in dependency order)."""
 	for doctype in doctypes:
 		frappe.publish_realtime(
@@ -108,8 +195,17 @@ def run_bulk_delete(doctypes, skip_hooks, delete_child_tables, batch_size, worke
 		)
 
 		try:
+			if cancel_before_delete and is_submittable(doctype):
+				cancel_submitted_docs(doctype, batch_size)
+
 			if skip_hooks:
 				delete_direct(doctype, delete_child_tables)
+			elif cancel_before_delete:
+				# When cancel_before_delete is on, we must delete synchronously
+				# to ensure each doctype is fully deleted before moving to the next.
+				# Otherwise async workers return immediately and the next doctype
+				# fails with LinkExistsError.
+				delete_with_hooks_sync(doctype, batch_size)
 			else:
 				delete_with_hooks(doctype, batch_size, workers)
 
@@ -127,6 +223,48 @@ def run_bulk_delete(doctypes, skip_hooks, delete_child_tables, batch_size, worke
 	frappe.publish_realtime("bulk_delete_complete", {"doctypes": doctypes})
 
 
+def cancel_submitted_docs(doctype, batch_size):
+	"""Cancel all submitted documents (docstatus=1) of the given doctype."""
+	submitted_docs = frappe.get_all(
+		doctype,
+		filters={"docstatus": 1},
+		pluck="name",
+	)
+
+	if not submitted_docs:
+		return
+
+	frappe.publish_realtime(
+		"bulk_delete_progress",
+		{"doctype": doctype, "status": "Cancelling", "total": len(submitted_docs)},
+	)
+
+	cancelled = 0
+	frappe.flags.in_bulk_delete = True
+
+	for name in submitted_docs:
+		try:
+			doc = frappe.get_doc(doctype, name)
+			doc.flags.ignore_permissions = True
+			doc.cancel()
+			cancelled += 1
+		except Exception as e:
+			frappe.log_error(f"Error cancelling {doctype} {name}: {e}")
+
+		if cancelled % batch_size == 0:
+			frappe.db.commit()
+			frappe.publish_realtime(
+				"bulk_delete_progress",
+				{"doctype": doctype, "status": "Cancelling", "cancelled": cancelled, "total": len(submitted_docs)},
+			)
+
+	frappe.db.commit()
+	frappe.publish_realtime(
+		"bulk_delete_progress",
+		{"doctype": doctype, "status": "Cancelled", "cancelled": cancelled},
+	)
+
+
 def delete_direct(doctype, delete_child_tables):
 	"""Fast path: direct DB delete, no hooks."""
 	if delete_child_tables:
@@ -134,6 +272,33 @@ def delete_direct(doctype, delete_child_tables):
 			frappe.db.delete(child_table, {"parenttype": doctype})
 
 	frappe.db.delete(doctype)
+	frappe.db.commit()
+
+
+def delete_with_hooks_sync(doctype, batch_size):
+	"""Synchronous delete with hooks. Used when cancel_before_delete is on
+	to guarantee each doctype is fully deleted before moving to the next."""
+	all_names = frappe.get_all(doctype, pluck="name")
+	if not all_names:
+		return
+
+	deleted = 0
+	frappe.flags.in_bulk_delete = True
+
+	for name in all_names:
+		try:
+			frappe.delete_doc(doctype, name, force=True)
+			deleted += 1
+		except Exception as e:
+			frappe.log_error(f"Error deleting {doctype} {name}: {e}")
+
+		if deleted % batch_size == 0:
+			frappe.db.commit()
+			frappe.publish_realtime(
+				"bulk_delete_progress",
+				{"doctype": doctype, "deleted": deleted, "total": len(all_names)},
+			)
+
 	frappe.db.commit()
 
 

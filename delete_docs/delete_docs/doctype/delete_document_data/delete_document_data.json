@@ -11,6 +11,8 @@
   "skip_hooks",
   "delete_child_tables",
   "auto_order_dependencies",
+  "cancel_before_delete",
+  "include_connected_docs",
   "column_break_options",
   "batch_size",
   "workers"
@@ -53,6 +55,20 @@
    "fieldname": "auto_order_dependencies",
    "fieldtype": "Check",
    "label": "Auto-order Dependencies"
+  },
+  {
+   "default": "0",
+   "description": "Cancel submitted (docstatus=1) documents before deleting them. Required for submittable DocTypes like Sales Order, Sales Invoice, etc.",
+   "fieldname": "cancel_before_delete",
+   "fieldtype": "Check",
+   "label": "Cancel Before Delete"
+  },
+  {
+   "default": "0",
+   "description": "Automatically discover and include all connected documents (e.g., Delivery Note, Sales Invoice linked to a Sales Order). They will be cancelled and deleted in the correct dependency order.",
+   "fieldname": "include_connected_docs",
+   "fieldtype": "Check",
+   "label": "Include Connected Documents"
   },
   {
    "fieldname": "column_break_options",
