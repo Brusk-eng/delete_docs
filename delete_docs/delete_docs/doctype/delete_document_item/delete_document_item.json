@@ -5,6 +5,8 @@
  "engine": "InnoDB",
  "field_order": [
   "document",
+  "filter_field",
+  "filter_value",
   "document_count",
   "status"
  ],
@@ -16,6 +18,21 @@
    "label": "DocType",
    "options": "DocType",
    "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.document",
+   "description": "Optional. Limits delete to docs where this field equals Filter Value.",
+   "fieldname": "filter_field",
+   "fieldtype": "Autocomplete",
+   "in_list_view": 1,
+   "label": "Filter Field"
+  },
+  {
+   "depends_on": "eval:doc.filter_field",
+   "fieldname": "filter_value",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Filter Value"
   },
   {
    "fieldname": "document_count",

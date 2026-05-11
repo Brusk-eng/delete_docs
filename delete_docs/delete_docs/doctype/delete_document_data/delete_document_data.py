@@ -29,7 +29,8 @@ class DeleteDocumentData(Document):
 	@frappe.whitelist()
 	def fetch_counts(self):
 		for row in self.documents:
-			row.document_count = frappe.db.count(row.document)
+			filters = row_filters(row)
+			row.document_count = frappe.db.count(row.document, filters=filters or None)
 			row.status = "Pending"
 		self.save()
 
@@ -38,6 +39,12 @@ class DeleteDocumentData(Document):
 		doctypes = [row.document for row in self.documents]
 		if not doctypes:
 			frappe.throw("Please add at least one DocType to delete.")
+
+		filters_by_doctype = {
+			row.document: row_filters(row)
+			for row in self.documents
+			if row_filters(row)
+		}
 
 		if self.include_connected_docs:
 			doctypes = discover_connected_doctypes(doctypes)
@@ -48,6 +55,7 @@ class DeleteDocumentData(Document):
 		frappe.enqueue(
 			run_bulk_delete,
 			doctypes=doctypes,
+			filters_by_doctype=filters_by_doctype,
 			skip_hooks=cint(self.skip_hooks),
 			delete_child_tables=cint(self.delete_child_tables),
 			cancel_before_delete=cint(self.cancel_before_delete),
@@ -60,6 +68,13 @@ class DeleteDocumentData(Document):
 			f"Bulk delete queued for {len(doctypes)} DocType(s) in the background.",
 			alert=True,
 		)
+
+
+def row_filters(row):
+	"""Return a {fieldname: value} dict for the row, or empty dict if no filter set."""
+	if not row.filter_field:
+		return {}
+	return {row.filter_field: row.filter_value}
 
 
 def discover_connected_doctypes(doctypes):
@@ -186,9 +201,11 @@ def get_child_tables(doctype):
 	return child_tables
 
 
-def run_bulk_delete(doctypes, skip_hooks, delete_child_tables, cancel_before_delete, batch_size, workers):
+def run_bulk_delete(doctypes, filters_by_doctype, skip_hooks, delete_child_tables, cancel_before_delete, batch_size, workers):
 	"""Process deletion for each DocType sequentially (in dependency order)."""
+	filters_by_doctype = filters_by_doctype or {}
 	for doctype in doctypes:
+		filters = filters_by_doctype.get(doctype) or {}
 		frappe.publish_realtime(
 			"bulk_delete_progress",
 			{"doctype": doctype, "status": "Deleting"},
@@ -196,18 +213,18 @@ def run_bulk_delete(doctypes, skip_hooks, delete_child_tables, cancel_before_del
 
 		try:
 			if cancel_before_delete and is_submittable(doctype):
-				cancel_submitted_docs(doctype, batch_size)
+				cancel_submitted_docs(doctype, batch_size, filters=filters)
 
 			if skip_hooks:
-				delete_direct(doctype, delete_child_tables)
+				delete_direct(doctype, delete_child_tables, filters=filters)
 			elif cancel_before_delete:
 				# When cancel_before_delete is on, we must delete synchronously
 				# to ensure each doctype is fully deleted before moving to the next.
 				# Otherwise async workers return immediately and the next doctype
 				# fails with LinkExistsError.
-				delete_with_hooks_sync(doctype, batch_size)
+				delete_with_hooks_sync(doctype, batch_size, filters=filters)
 			else:
-				delete_with_hooks(doctype, batch_size, workers)
+				delete_with_hooks(doctype, batch_size, workers, filters=filters)
 
 			frappe.publish_realtime(
 				"bulk_delete_progress",
@@ -223,11 +240,12 @@ def run_bulk_delete(doctypes, skip_hooks, delete_child_tables, cancel_before_del
 	frappe.publish_realtime("bulk_delete_complete", {"doctypes": doctypes})
 
 
-def cancel_submitted_docs(doctype, batch_size):
+def cancel_submitted_docs(doctype, batch_size, filters=None):
 	"""Cancel all submitted documents (docstatus=1) of the given doctype."""
+	cancel_filters = {"docstatus": 1, **(filters or {})}
 	submitted_docs = frappe.get_all(
 		doctype,
-		filters={"docstatus": 1},
+		filters=cancel_filters,
 		pluck="name",
 	)
 
@@ -265,20 +283,22 @@ def cancel_submitted_docs(doctype, batch_size):
 	)
 
 
-def delete_direct(doctype, delete_child_tables):
+def delete_direct(doctype, delete_child_tables, filters=None):
 	"""Fast path: direct DB delete, no hooks."""
-	if delete_child_tables:
+	# Skip child-table cleanup when filtering: parenttype-based delete would
+	# orphan/over-delete child rows whose parents weren't actually deleted.
+	if delete_child_tables and not filters:
 		for child_table in get_child_tables(doctype):
 			frappe.db.delete(child_table, {"parenttype": doctype})
 
-	frappe.db.delete(doctype)
+	frappe.db.delete(doctype, filters or None)
 	frappe.db.commit()
 
 
-def delete_with_hooks_sync(doctype, batch_size):
+def delete_with_hooks_sync(doctype, batch_size, filters=None):
 	"""Synchronous delete with hooks. Used when cancel_before_delete is on
 	to guarantee each doctype is fully deleted before moving to the next."""
-	all_names = frappe.get_all(doctype, pluck="name")
+	all_names = frappe.get_all(doctype, filters=filters or None, pluck="name")
 	if not all_names:
 		return
 
@@ -302,9 +322,9 @@ def delete_with_hooks_sync(doctype, batch_size):
 	frappe.db.commit()
 
 
-def delete_with_hooks(doctype, batch_size, workers):
+def delete_with_hooks(doctype, batch_size, workers, filters=None):
 	"""Slow path: uses frappe.delete_doc so hooks run. Parallelized across workers."""
-	all_names = frappe.get_all(doctype, pluck="name")
+	all_names = frappe.get_all(doctype, filters=filters or None, pluck="name")
 	if not all_names:
 		return
 

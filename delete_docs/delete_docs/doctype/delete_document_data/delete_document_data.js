@@ -25,8 +25,38 @@ frappe.ui.form.on("Delete Document Data", {
 				indicator: "green",
 			});
 		});
+
+		(frm.doc.documents || []).forEach((row) => set_filter_field_options(frm, row));
 	},
 });
+
+frappe.ui.form.on("Delete Document Item", {
+	document(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		frappe.model.set_value(cdt, cdn, "filter_field", "");
+		frappe.model.set_value(cdt, cdn, "filter_value", "");
+		set_filter_field_options(frm, row);
+	},
+});
+
+async function set_filter_field_options(frm, row) {
+	if (!row.document) return;
+	await frappe.model.with_doctype(row.document);
+	const meta = frappe.get_meta(row.document);
+	const skip = new Set([
+		"Section Break", "Column Break", "Tab Break",
+		"HTML", "Button", "Heading", "Image", "Table", "Table MultiSelect",
+	]);
+	const fieldnames = (meta.fields || [])
+		.filter((df) => df.fieldname && !skip.has(df.fieldtype))
+		.map((df) => df.fieldname);
+	const grid_row = frm.fields_dict.documents.grid.grid_rows_by_docname[row.name];
+	if (grid_row) {
+		const df = grid_row.docfields.find((d) => d.fieldname === "filter_field");
+		if (df) df.options = fieldnames.join("\n");
+		if (grid_row.refresh_field) grid_row.refresh_field("filter_field");
+	}
+}
 
 async function confirm_and_delete(frm) {
 	const doctype_list = (frm.doc.documents || [])
